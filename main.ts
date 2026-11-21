@@ -1,82 +1,59 @@
-// gta6-trophy-rarity-forecast-01 — a refresh-aware earner-growth forecaster.
+// gta6-trophy-rarity-forecast-01 — forecasting GTA VI trophy earn rates
+// on Exophase one week after launch, from the house's page reads.
 //
-// What this program does, in one paragraph: Exophase does not update its
-// trophy page continuously. It refreshes a game's counts on its own schedule,
-// hours apart, so the page sits frozen between refreshes and then jumps: the
-// players-tracked count leaps up and (almost) every earn rate falls, because
-// the newly tracked players have played far less than the ones already
-// counted. A rate is therefore not a smooth series but a ratio of two moving
-// counts, earners over tracked players, and the two move for different
-// reasons: tracked players grow as more people buy the game and sync a
-// profile, while earners grow as the players already counted keep playing.
-// This program forecasts the ratio by modelling the two counts separately
-// where it can and by fitting the ratio's own trend where it must, and it
-// keeps its quantile bands wide enough that a refresh can move a rate a long
-// way without leaving the band.
+// The page Exophase shows is not a live counter. It freezes for hours and
+// then jumps: the tracked-player count leaps, and almost every earn rate
+// falls, because the players who just appeared have barely played. So a
+// rate is a ratio of two counts that move for different reasons — the
+// denominator grows as more people buy the game and sync a profile, the
+// numerator grows as the players already counted keep playing — and this
+// program forecasts the ratio by treating the two sides separately
+// wherever the data allows it, and by fitting the ratio's own drift where
+// it does not. Its bands are kept wide on purpose: a refresh can move a
+// rate a long way in one step, and a band that pretends otherwise is
+// wrong the moment the page jumps.
 //
-// How it works, step by step:
-//   1. Collapse the history into plateaus: consecutive reads that print the
-//      same players-tracked count and the same rates are one frozen page.
-//      A plateau ends when a read prints different numbers, which is when
-//      Exophase refreshed. The refresh itself is dated at the midpoint of
-//      the gap between the last read of the old plateau and the first read
-//      of the new one.
-//   2. Recover earners per trophy per plateau: earners = rate x tracked /
-//      100, rounded. Rates are printed to two decimals, so with hundreds of
-//      players tracked this recovers the exact earner count, and with
-//      hundreds of thousands it is still within a handful.
-//   3. Forecast the players-tracked count at the target. With at least two
-//      plateaus it fits two growth curves to the plateau counts — a power
-//      law in time since release and a saturating exponential — and averages
-//      them in log space, so neither an exploding nor a flattening curve
-//      decides alone. With a single plateau (no refresh ever seen) it falls
-//      back to a launch-growth prior: tracked players multiply fast in the
-//      first hours after a record launch and the pace decays as the launch
-//      matures. The prior's pace is calibrated to the one refresh the rules
-//      publish for launch night (638 tracked players becoming 3,868).
-//   4. Forecast each trophy's rate. With three or more plateaus it fits two
-//      trend models and blends them: a saturating hazard curve — the rate
-//      rises toward a ceiling C like C x (1 - exp(-hours / H)), which is
-//      what a trophy's earn rate does as the players who can earn it
-//      gradually do, and which cannot run away the way a straight line can
-//      — and a line on the logit of the rate against log(1 + hours), which
-//      stays useful for a trophy still in its steep phase. Both are fitted
-//      by weighted least squares (a read's weight is its binomial
-//      precision), both have their pace shrunk toward the mean pace of
-//      trophies of the same kind, and the blend leans three-to-one toward
-//      the saturating curve, because a rate that is flattening is the
-//      normal case by the third day and a line extrapolated from it
-//      overshoots. With two plateaus it averages that blend with the
-//      dilution forecast below; with one plateau it uses the dilution
-//      forecast alone, because a flat history holds no trend at all.
-//   5. The dilution forecast is the arithmetic of a refresh: when tracked
-//      players jump from N to N', the new players bring earners at a
-//      fraction of the old rate. A new player has typically had about an
-//      hour of play, so the fraction is exp(-H / 0.75) where H is the hours
-//      of play a trophy usually needs — read off the trophy's own
-//      description (a chapter number, a count of stunts, a dollar amount),
-//      never off a hardcoded rate. The opening mission is the exception:
-//      everybody finishes it in their first minutes, so new players bring
-//      it at the full rate and it stays at 100%.
-//   6. Guardrails: earners cannot fall, so the forecast rate cannot fall
-//      below last earners over forecast tracked players; and each kind of
-//      trophy has a generous ceiling for one week of play, so an
-//      extrapolated trend cannot claim that 95% of players finished a
-//      200-hour platinum in seven days.
-//   7. Quantiles are honest. The spread on the logit scale combines the
-//      trend fit's own residual (grown by how far the target is past the
-//      data), a random-walk term that widens with the square root of the
-//      horizon, a refresh-jump term proportional to how much the tracked
-//      count is expected to grow (a refresh dilutes every rate by about the
-//      log of that growth), a small-count term for trophies with only a
-//      handful of earners, and a floor. A trophy that has sat at 100% at
-//      every plateau gets a hedged row instead: the median stays at 100%,
-//      but the lower quantiles admit that a flood of new players could
-//      pull it down, and the hedge tightens once the trophy has survived a
-//      tenfold growth in tracked players without budging.
+// The forecast is built in layers, one trophy at a time:
+//   1. The read history is squeezed into "slices": runs of reads that
+//      print identical numbers are one frozen page. A slice ends when a
+//      read prints different numbers, which is when Exophase refreshed;
+//      the refresh is placed halfway across the gap between the last read
+//      of the old slice and the first read of the new one.
+//   2. Earners are recovered per slice: earners = rate x tracked / 100,
+//      rounded. Rates print to two decimals, so while tracked players
+//      number in the hundreds this recovers the exact earner count.
+//   3. The tracked count at the target is projected two ways — a power
+//      law against log time and a saturating exponential — and the two
+//      projections are averaged in log space. With a single slice (no
+//      refresh ever seen) a launch-night prior takes over instead, tuned
+//      to the one refresh the rules publish (638 tracked becoming 3,868).
+//   4. Each trophy's rate is projected from its own history. With three
+//      or more slices two trend shapes are fitted — a saturating curve
+//      that rises toward a ceiling, and a straight line of the logit's
+//      rate against log time — and blended three-to-one toward the curve,
+//      because a flattening rate is the usual case by day three and a
+//      line drawn from it overshoots. Both fits are weighted by binomial
+//      precision and pulled toward the average pace of trophies of the
+//      same kind. With two slices the trend is averaged with the
+//      dilution arithmetic; with one slice the dilution arithmetic
+//      stands alone.
+//   5. Dilution is the arithmetic of a refresh: when tracked players
+//      jump from N to N', the newcomers bring earners at a fraction
+//      exp(-H / 0.75) of the old rate, H being the hours of play the
+//      trophy usually needs — except the opening mission, which
+//      everybody finishes first, so it stays at 100%.
+//   6. Guardrails: earners never fall, and no trophy may pass its
+//      kind's generous one-week ceiling.
+//   7. The quantile spread on the logit scale combines the fit's own
+//      residual (grown by how far the target sits past the data), a
+//      random-walk term over the horizon, a refresh-jump term tied to
+//      how much the tracked count is expected to grow, a small-count
+//      term, and a floor. A trophy at 100% on every slice gets a hedged
+//      row instead: the median stays at 100% while the lower quantiles
+//      admit a flood of new players could pull it down.
 //
-// Everything is deterministic: no randomness, no clock reads, no network,
-// no input beyond the case file. Standard library only.
+// Deterministic throughout: no randomness, no clock, no network — the
+// output depends only on the case file. Standard library only.
 
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -84,8 +61,74 @@ import { join } from 'node:path';
 const INPUT_DIR = process.env.MAKEFUN_INPUT_DIR ?? '/input';
 const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-/** The quantile levels the contest scores, in the order each row lists them. */
+/** The five quantile levels the contest scores, in row order. */
 const LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95];
+
+const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+/** A rate in percent, kept inside the range the scorer's logit can take. */
+const clampPct = (v: number): number => clamp(v, 0.01, 99.99);
+/** Logit of a percent. */
+const logitOf = (pct: number): number => {
+  const p = clampPct(pct) / 100;
+  return Math.log(p / (1 - p));
+};
+/** Inverse logit, back to a percent. */
+const pctOfLogit = (l: number): number => 100 / (1 + Math.exp(-clamp(l, -12, 12)));
+/** Rounded to 4 decimals, as the starter rounds its rows. */
+const round4 = (v: number): number => Math.round(v * 10_000) / 10_000;
+
+/**
+ * Inverse of the standard normal CDF, Acklam's rational approximation.
+ * The coefficients are the published ones for that approximation; the
+ * layout here is my own.
+ */
+function normalQuantile(p: number): number {
+  const a = [-39.69683028665376, 220.9460984245205, -275.9285104469687, 138.357751867269, -30.66479806614716, 2.506628277459239];
+  const b = [-54.47609879822406, 161.5858368580409, -155.6989798598866, 66.80131188771972, -13.28068155288572];
+  const c = [-0.007784894002430293, -0.3223964580411365, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783];
+  const d = [0.007784695709041462, 0.3224671290700398, 2.445134137142996, 3.754408661907416];
+  const tail = 0.02425;
+  const poly = (coeffs: number[], x: number): number => {
+    let acc = coeffs[0];
+    for (let i = 1; i < coeffs.length; i++) acc = acc * x + coeffs[i];
+    return acc;
+  };
+  if (p < tail) {
+    const q = Math.sqrt(-2 * Math.log(p));
+    return poly(c, q) / (poly(d, q) * q + 1);
+  }
+  if (p > 1 - tail) {
+    const q = Math.sqrt(-2 * Math.log(1 - p));
+    return -poly(c, q) / (poly(d, q) * q + 1);
+  }
+  const q = p - 0.5;
+  const r = q * q;
+  return (poly(a, r) * q) / (poly(b, r) * r + 1);
+}
+
+/**
+ * Weighted least squares of y on x. Returns [intercept, slope]; with a
+ * degenerate design the slope is 0 and the intercept the mean of y.
+ */
+function weightedLine(xs: number[], ys: number[], ws: number[]): [number, number] {
+  let sw = 0;
+  let swx = 0;
+  let swy = 0;
+  let swxx = 0;
+  let swxy = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const w = ws[i];
+    sw += w;
+    swx += w * xs[i];
+    swy += w * ys[i];
+    swxx += w * xs[i] * xs[i];
+    swxy += w * xs[i] * ys[i];
+  }
+  const denom = sw * swxx - swx * swx;
+  if (Math.abs(denom) < 1e-12 || sw <= 0) return [sw > 0 ? swy / sw : 0, 0];
+  const slope = (sw * swxy - swx * swy) / denom;
+  return [(swy - slope * swx) / sw, slope];
+}
 
 interface Trophy {
   id: number;
@@ -96,7 +139,7 @@ interface Trophy {
   secret: boolean;
 }
 
-interface Read {
+interface PageRead {
   slot: string;
   at: string;
   players_tracked: number;
@@ -112,467 +155,445 @@ interface CaseFile {
   levels: number[];
   game: { name: string; platform: string; release_date: string; source: string };
   trophies: Trophy[];
-  history: Read[];
+  history: PageRead[];
   notes?: string;
 }
 
-interface Plateau {
+/** One frozen page of Exophase history. */
+interface Slice {
   /** Hours since release at the estimated refresh moment. */
-  tHours: number;
-  tracked: number;
+  hours: number;
+  /** Players tracked on that page. */
+  players: number;
   rates: Array<number | null>;
 }
 
-interface Kind {
-  /** Story chapter, grind, activity, named mission, and so on. */
-  kind: string;
-  /** Hours of play a trophy of this kind usually needs. */
+/** What a trophy is like, as read off its own description and tier. */
+interface TrophyKind {
+  label: string;
+  /** Hours of play earning it usually takes — a gameplay prior. */
   hours: number;
   /** Generous ceiling, in percent, for one week of play. */
-  cap: number;
-}
-
-const clamp = (x: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, x));
-const clampRate = (x: number): number => clamp(x, 0.01, 99.99);
-const logit = (pct: number): number => {
-  const p = clampRate(pct) / 100;
-  return Math.log(p / (1 - p));
-};
-const invLogit = (l: number): number => 100 / (1 + Math.exp(-clamp(l, -12, 12)));
-/** x rounded to 4 decimals. */
-const round4 = (x: number): number => Math.round(x * 10_000) / 10_000;
-
-/** Inverse standard normal CDF (Acklam's rational approximation). */
-function normQuantile(p: number): number {
-  const a = [-39.69683028665376, 220.9460984245205, -275.9285104469687, 138.357751867269, -30.66479806614716, 2.506628277459239];
-  const b = [-54.47609879822406, 161.5858368580409, -155.6989798598866, 66.80131188771972, -13.28068155288572];
-  const c = [-0.007784894002430293, -0.3223964580411365, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783];
-  const d = [0.007784695709041462, 0.3224671290700398, 2.445134137142996, 3.754408661907416];
-  const pLow = 0.02425;
-  const pHigh = 1 - pLow;
-  let q: number;
-  let r: number;
-  if (p < pLow) {
-    q = Math.sqrt(-2 * Math.log(p));
-    return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
-      ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
-  }
-  if (p > pHigh) {
-    q = Math.sqrt(-2 * Math.log(1 - p));
-    return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
-      ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
-  }
-  q = p - 0.5;
-  r = q * q;
-  return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q /
-    (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
-}
-
-/** Ordinary least squares of y on x, returning [intercept, slope]. */
-function linfit(xs: number[], ys: number[]): [number, number] {
-  const n = xs.length;
-  let sx = 0;
-  let sy = 0;
-  let sxx = 0;
-  let sxy = 0;
-  for (let i = 0; i < n; i++) {
-    sx += xs[i];
-    sy += ys[i];
-    sxx += xs[i] * xs[i];
-    sxy += xs[i] * ys[i];
-  }
-  const denom = n * sxx - sx * sx;
-  if (Math.abs(denom) < 1e-12) return [sy / n, 0];
-  const slope = (n * sxy - sx * sy) / denom;
-  return [(sy - slope * sx) / n, slope];
+  ceiling: number;
 }
 
 /**
- * What kind of trophy this is, read off its own description and tier, and
- * how many hours of play earning it usually takes. The hours are a prior
- * about gameplay, not about rates: a chapter number, a stunt count or a
- * dollar amount in the description is all the evidence used, and the same
- * rule applies to every trophy the case lists, whatever the game.
+ * Kind rules, in the order they are tried: the first match wins. The
+ * numbers are gameplay priors, not rates — a chapter number, a stunt
+ * count or a dollar amount in the description is the only evidence
+ * used, and the same table applies to every trophy the case lists.
  */
-function classify(t: Trophy): Kind {
+const KIND_RULES: Array<{ test: RegExp; hours: (m: RegExpMatchArray) => number; ceiling: number; label: string }> = [
+  { test: /complete chapter (\d+)/i, hours: (m) => 1.5 + Number(m[1]), ceiling: 90, label: 'chapter' },
+  { test: /final mission/i, hours: () => 25, ceiling: 70, label: 'finale' },
+  { test: /100% completion/i, hours: () => 200, ceiling: 8, label: 'completion' },
+  { test: /complete (\d+) stunts/i, hours: (m) => 5 + 0.15 * Number(m[1]), ceiling: 50, label: 'grind' },
+  { test: /complete (\d+) challenges/i, hours: (m) => 5 + 0.15 * Number(m[1]), ceiling: 50, label: 'grind' },
+  { test: /(\d+) locations/i, hours: (m) => 5 + 0.15 * Number(m[1]), ceiling: 50, label: 'grind' },
+  { test: /discover (\d+) vehicles/i, hours: (m) => 5 + 0.15 * Number(m[1]), ceiling: 50, label: 'grind' },
+  { test: /register (\d+) vehicles/i, hours: (m) => 5 + 0.1 * Number(m[1]), ceiling: 50, label: 'grind' },
+  { test: /(\d+) bank vaults/i, hours: (m) => 5 + 0.2 * Number(m[1]), ceiling: 50, label: 'grind' },
+  { test: /collectible card sets/i, hours: () => 20, ceiling: 40, label: 'grind' },
+  { test: /meditate at every spot/i, hours: () => 15, ceiling: 40, label: 'grind' },
+  { test: /gold medal in all/i, hours: () => 12, ceiling: 40, label: 'grind' },
+  { test: /win .* at every location/i, hours: () => 10, ceiling: 40, label: 'grind' },
+  { test: /complete (\d+) mission strands/i, hours: () => 10, ceiling: 50, label: 'grind' },
+  { test: /earn \$[\d,]+/i, hours: () => 25, ceiling: 40, label: 'grind' },
+  { test: /spend \$[\d,]+/i, hours: () => 15, ceiling: 40, label: 'grind' },
+  { test: /purchase all/i, hours: () => 12, ceiling: 40, label: 'grind' },
+  { test: /try each type of activity/i, hours: () => 2, ceiling: 70, label: 'activity' },
+  { test: /complete an arcade game/i, hours: () => 0.5, ceiling: 70, label: 'activity' },
+  { test: /fishing challenge/i, hours: () => 1, ceiling: 70, label: 'activity' },
+  { test: /take down \d+ enemies/i, hours: () => 1, ceiling: 70, label: 'activity' },
+  { test: /enjoy a cocktail/i, hours: () => 0.5, ceiling: 70, label: 'activity' },
+  { test: /bowling alley/i, hours: () => 1, ceiling: 70, label: 'activity' },
+  { test: /bowl 'em over/i, hours: () => 1, ceiling: 70, label: 'activity' },
+  { test: /unscheduled departure/i, hours: () => 2, ceiling: 70, label: 'activity' },
+  { test: /smash your way out/i, hours: () => 2, ceiling: 70, label: 'activity' },
+  { test: /^rob /i, hours: () => 3, ceiling: 70, label: 'activity' },
+  { test: /win (\d+) different races/i, hours: () => 4, ceiling: 70, label: 'activity' },
+  { test: /lose a \d+ star wanted/i, hours: () => 2, ceiling: 70, label: 'activity' },
+  { test: /hunt a unique animal/i, hours: () => 3, ceiling: 70, label: 'activity' },
+  { test: /explore all of/i, hours: () => 8, ceiling: 70, label: 'activity' },
+  { test: /^complete [A-Z]/i, hours: () => 8, ceiling: 80, label: 'mission' },
+];
+
+function kindOf(t: Trophy): TrophyKind {
   const d = t.description ?? '';
-  if (/gone fishing/i.test(d)) return { kind: 'opening', hours: 0.1, cap: 99.99 };
-  if (t.tier === 'platinum') return { kind: 'platinum', hours: 200, cap: 3 };
-  const chapter = d.match(/complete chapter (\d+)/i);
-  if (chapter) return { kind: 'chapter', hours: 1.5 + Number(chapter[1]), cap: 90 };
-  if (/final mission/i.test(d)) return { kind: 'finale', hours: 25, cap: 70 };
-  if (/100% completion/i.test(d)) return { kind: 'completion', hours: 200, cap: 8 };
-  let m: RegExpMatchArray | null;
-  if ((m = d.match(/complete (\d+) stunts/i))) return { kind: 'grind', hours: 5 + 0.15 * Number(m[1]), cap: 50 };
-  if ((m = d.match(/complete (\d+) challenges/i))) return { kind: 'grind', hours: 5 + 0.15 * Number(m[1]), cap: 50 };
-  if ((m = d.match(/(\d+) locations/i))) return { kind: 'grind', hours: 5 + 0.15 * Number(m[1]), cap: 50 };
-  if ((m = d.match(/discover (\d+) vehicles/i))) return { kind: 'grind', hours: 5 + 0.15 * Number(m[1]), cap: 50 };
-  if ((m = d.match(/register (\d+) vehicles/i))) return { kind: 'grind', hours: 5 + 0.1 * Number(m[1]), cap: 50 };
-  if ((m = d.match(/(\d+) bank vaults/i))) return { kind: 'grind', hours: 5 + 0.2 * Number(m[1]), cap: 50 };
-  if (/collectible card sets/i.test(d)) return { kind: 'grind', hours: 20, cap: 40 };
-  if (/meditate at every spot/i.test(d)) return { kind: 'grind', hours: 15, cap: 40 };
-  if (/gold medal in all/i.test(d)) return { kind: 'grind', hours: 12, cap: 40 };
-  if (/win .* at every location/i.test(d)) return { kind: 'grind', hours: 10, cap: 40 };
-  if ((m = d.match(/complete (\d+) mission strands/i))) return { kind: 'grind', hours: 10, cap: 50 };
-  if (/earn \$[\d,]+/i.test(d)) return { kind: 'grind', hours: 25, cap: 40 };
-  if (/spend \$[\d,]+/i.test(d)) return { kind: 'grind', hours: 15, cap: 40 };
-  if (/purchase all/i.test(d)) return { kind: 'grind', hours: 12, cap: 40 };
-  if (/try each type of activity/i.test(d)) return { kind: 'activity', hours: 2, cap: 70 };
-  if (/complete an arcade game/i.test(d)) return { kind: 'activity', hours: 0.5, cap: 70 };
-  if (/fishing challenge/i.test(d)) return { kind: 'activity', hours: 1, cap: 70 };
-  if (/take down \d+ enemies/i.test(d)) return { kind: 'activity', hours: 1, cap: 70 };
-  if (/enjoy a cocktail/i.test(d)) return { kind: 'activity', hours: 0.5, cap: 70 };
-  if (/bowling alley/i.test(d)) return { kind: 'activity', hours: 1, cap: 70 };
-  if (/bowl 'em over/i.test(d)) return { kind: 'activity', hours: 1, cap: 70 };
-  if (/unscheduled departure/i.test(d)) return { kind: 'activity', hours: 2, cap: 70 };
-  if (/smash your way out/i.test(d)) return { kind: 'activity', hours: 2, cap: 70 };
-  if (/^rob /i.test(d)) return { kind: 'activity', hours: 3, cap: 70 };
-  if ((m = d.match(/win (\d+) different races/i))) return { kind: 'activity', hours: 4, cap: 70 };
-  if (/lose a \d+ star wanted/i.test(d)) return { kind: 'activity', hours: 2, cap: 70 };
-  if (/hunt a unique animal/i.test(d)) return { kind: 'activity', hours: 3, cap: 70 };
-  if (/explore all of/i.test(d)) return { kind: 'activity', hours: 8, cap: 70 };
-  if (/^complete [A-Z]/i.test(d)) return { kind: 'mission', hours: 8, cap: 80 };
-  return { kind: 'other', hours: 5, cap: 85 };
+  // The opening mission outranks even the platinum check: a trophy whose
+  // description is the opening mission is the opening mission, whatever
+  // its tier. (In the real list the two never overlap; this only settles
+  // the precedence.)
+  if (/gone fishing/i.test(d)) return { label: 'opening', hours: 0.1, ceiling: 99.99 };
+  if (t.tier === 'platinum') return { label: 'platinum', hours: 200, ceiling: 3 };
+  for (const rule of KIND_RULES) {
+    const m = d.match(rule.test);
+    if (m !== null) return { label: rule.label, hours: rule.hours(m), ceiling: rule.ceiling };
+  }
+  return { label: 'other', hours: 5, ceiling: 85 };
 }
 
 /**
- * Collapse the history into plateaus: runs of reads that print the same
- * players-tracked count and the same rates are one frozen page. A plateau
- * ends at a refresh, dated at the midpoint between the last read of the old
- * plateau and the first read of the new one (the refresh happened somewhere
- * in that gap); the first plateau is dated at its first read.
+ * Squeeze the read history into slices: consecutive reads printing the
+ * same tracked count and the same rates are one frozen page. A slice
+ * ends at a refresh, dated at the midpoint between the last read of the
+ * old slice and the first read of the new one; the first slice is dated
+ * at its first read.
  */
-function extractPlateaus(c: CaseFile, releaseMs: number): Plateau[] {
-  const out: Plateau[] = [];
-  let prevEndMs = 0;
-  for (const r of c.history) {
-    const ms = Date.parse(r.at);
+function collapseHistory(c: CaseFile, releaseMs: number): Slice[] {
+  const slices: Slice[] = [];
+  let gapEndMs = 0;
+  for (const read of c.history) {
+    const ms = Date.parse(read.at);
     if (Number.isNaN(ms)) continue;
-    const lastPlateau = out[out.length - 1];
-    const sameAsLast = lastPlateau !== undefined &&
-      lastPlateau.tracked === r.players_tracked &&
-      lastPlateau.rates.length === r.rates.length &&
-      lastPlateau.rates.every((v, j) => v === r.rates[j]);
-    if (sameAsLast) {
-      prevEndMs = ms;
+    const prev = slices[slices.length - 1];
+    const frozen = prev !== undefined &&
+      prev.players === read.players_tracked &&
+      prev.rates.length === read.rates.length &&
+      prev.rates.every((v, j) => v === read.rates[j]);
+    if (frozen) {
+      gapEndMs = ms;
       continue;
     }
-    const refreshMs = out.length === 0 ? ms : (prevEndMs + ms) / 2;
-    out.push({
-      tHours: Math.max(0.1, (refreshMs - releaseMs) / 3_600_000),
-      tracked: r.players_tracked,
-      rates: r.rates.slice(),
+    const refreshMs = slices.length === 0 ? ms : (gapEndMs + ms) / 2;
+    slices.push({
+      hours: Math.max(0.1, (refreshMs - releaseMs) / 3_600_000),
+      players: read.players_tracked,
+      rates: read.rates.slice(),
     });
-    prevEndMs = ms;
+    gapEndMs = ms;
   }
-  return out;
+  return slices;
 }
 
 /**
- * Forecast the players-tracked count at the target, in hours since release.
- * With at least two distinct counts it fits a power law in log time and a
- * saturating exponential and averages the two in log space; with one count
- * it uses the launch-growth prior (fast multiplication in the first hours
- * after a record launch, decaying as the launch matures), calibrated to the
- * launch-night refresh the rules publish: 638 tracked players becoming
- * 3,868, a factor of about six over the first five hours.
+ * Project the tracked-player count at the target, in hours since release.
+ * With at least two distinct counts, two growth shapes are fitted to the
+ * slice counts — a power law in log time and a saturating exponential —
+ * and averaged in log space, so neither an exploding nor a flattening
+ * curve decides alone. With one count, the launch prior takes over:
+ * tracked players multiply fast in the first hours after a record
+ * launch and the pace decays as the launch matures, calibrated to the
+ * launch-night refresh the rules publish (638 tracked becoming 3,868,
+ * about a sixfold jump over the first five hours).
  */
-function forecastTracked(plateaus: Plateau[], tTarget: number): number {
-  const last = plateaus[plateaus.length - 1];
-  const distinct = plateaus.filter((p, i) => i === 0 || p.tracked !== plateaus[i - 1].tracked);
+function projectTracked(slices: Slice[], tTarget: number): number {
+  const last = slices[slices.length - 1];
+  const distinct = slices.filter((s, i) => i === 0 || s.players !== slices[i - 1].players);
   if (distinct.length < 2) {
-    const growthPerHour = 0.55 / (1 + tTarget / 8);
-    const windowHours = Math.max(0, tTarget - plateaus[0].tHours);
-    return last.tracked * Math.exp(growthPerHour * windowHours);
+    const pace = 0.55 / (1 + tTarget / 8);
+    const span = Math.max(0, tTarget - slices[0].hours);
+    return last.players * Math.exp(pace * span);
   }
-  // Power law: log tracked against log(1 + hours).
-  const xs = distinct.map((p) => Math.log1p(p.tHours));
-  const ys = distinct.map((p) => Math.log(Math.max(1, p.tracked)));
-  const [a, b] = linfit(xs, ys);
-  const slope = Math.max(0, b);
-  const nPower = Math.exp(a + slope * Math.log1p(tTarget));
-  // Saturating exponential: tracked = Ninf * (1 - exp(-k * hours)).
-  // Grid over k, fitting Ninf by relative least squares at each step.
-  let bestSse = Infinity;
-  let bestNinf = last.tracked;
-  let bestK = 0.05;
+  // Power law: log players against log(1 + hours), slope floored at 0.
+  const [aPow, bPow] = weightedLine(
+    distinct.map((s) => Math.log1p(s.hours)),
+    distinct.map((s) => Math.log(Math.max(1, s.players))),
+    distinct.map(() => 1),
+  );
+  const nPow = Math.exp(aPow + Math.max(0, bPow) * Math.log1p(tTarget));
+  // Saturating exponential: players = Ninf * (1 - exp(-k * hours)).
+  // Scan k on a log grid; at each step Ninf comes from relative least
+  // squares, and the k with the smallest relative error wins.
+  let best = { sse: Infinity, ninf: last.players, k: 0.05 };
   for (let k = 0.002; k <= 1.5; k *= 1.25) {
-    const u = distinct.map((p) => 1 - Math.exp(-k * p.tHours));
+    const u = distinct.map((s) => 1 - Math.exp(-k * s.hours));
     let suu = 0;
     let sun = 0;
     for (let j = 0; j < u.length; j++) {
       suu += u[j] * u[j];
-      sun += u[j] * distinct[j].tracked;
+      sun += u[j] * distinct[j].players;
     }
     const ninf = sun / Math.max(suu, 1e-12);
     if (!(ninf > 0)) continue;
     let sse = 0;
     for (let j = 0; j < u.length; j++) {
-      const rel = (distinct[j].tracked - ninf * u[j]) / distinct[j].tracked;
+      const rel = (distinct[j].players - ninf * u[j]) / distinct[j].players;
       sse += rel * rel;
     }
-    if (sse < bestSse) {
-      bestSse = sse;
-      bestNinf = ninf;
-      bestK = k;
-    }
+    if (sse < best.sse) best = { sse, ninf, k };
   }
-  const nSat = bestNinf * (1 - Math.exp(-bestK * tTarget));
-  const n = Math.exp((Math.log(Math.max(1, nPower)) + Math.log(Math.max(1, nSat))) / 2);
-  return clamp(n, last.tracked, last.tracked * 30);
+  const nSat = best.ninf * (1 - Math.exp(-best.k * tTarget));
+  const n = Math.exp((Math.log(Math.max(1, nPow)) + Math.log(Math.max(1, nSat))) / 2);
+  return clamp(n, last.players, last.players * 30);
 }
 
-interface SaturatingFit {
-  /** Ceiling the rate rises toward, in percent. */
-  ceiling: number;
-  /** Hours of play that set the pace of the rise. */
-  paceHours: number;
-  /** Residual spread of the logit rates around the fitted curve. */
-  residLogitSd: number;
-  n: number;
-}
-
-interface SatPoint {
-  tau: number;
-  rate: number;
+/** One observation for the trend fits: a slice's rate for one trophy. */
+interface Obs {
+  /** Hours since release at the slice's refresh. */
+  t: number;
+  /** Rate in percent on that slice. */
+  r: number;
+  /** Binomial precision weight, clamped. */
   w: number;
 }
 
+/** A saturating-curve fit: rate rises toward a ceiling like C(1 - e^-t/H). */
+interface SatFit {
+  ceiling: number;
+  pace: number;
+  /** Residual spread of the logit rates around the fitted curve. */
+  resid: number;
+  n: number;
+}
+
+/** A logit-line fit: logit(rate) linear in log(1 + hours). */
+interface LineFit {
+  intercept: number;
+  slope: number;
+  /** Residual spread around the fitted line, on the logit scale. */
+  resid: number;
+  n: number;
+  meanX: number;
+  ssx: number;
+}
+
+/** Binomial precision of a rate reading: earners x (tracked - earners) / tracked. */
+function precision(players: number, ratePct: number): number {
+  const earners = Math.round((clampPct(ratePct) / 100) * players);
+  return clamp((earners * Math.max(1, players - earners)) / Math.max(1, players), 0.5, 500);
+}
+
+function observations(slices: Slice[], idx: number): Obs[] {
+  const out: Obs[] = [];
+  for (const s of slices) {
+    const r = s.rates[idx];
+    if (r === null || r === undefined) continue;
+    out.push({ t: s.hours, r: clampPct(r), w: precision(s.players, r) });
+  }
+  return out;
+}
+
 /**
- * The saturating fit, unshrunk: rate = C x (1 - exp(-tau / H)). Grid over
- * H on a log scale, solving C by weighted least squares at each step, and
- * keep the H with the smallest weighted squared error in rate space.
- * Returns null with fewer than two usable points.
+ * The saturating fit, unshrunk: rate = C x (1 - exp(-t / H)). Scan H on
+ * a log grid, solve C by weighted least squares at each step, keep the H
+ * with the smallest weighted squared error in rate space. Null below two
+ * usable points.
  */
-function saturatingFitRaw(points: SatPoint[]): { ceiling: number; paceHours: number } | null {
-  if (points.length < 2) return null;
-  let best: { ceiling: number; paceHours: number; sse: number } | null = null;
+function fitSaturationRaw(obs: Obs[]): { ceiling: number; pace: number } | null {
+  if (obs.length < 2) return null;
+  let best: { ceiling: number; pace: number; sse: number } | null = null;
   for (let h = 1; h <= 3000; h *= 1.35) {
-    const u = points.map((p) => 1 - Math.exp(-p.tau / h));
+    const u = obs.map((o) => 1 - Math.exp(-o.t / h));
     let suu = 0;
     let sur = 0;
-    for (let j = 0; j < points.length; j++) {
-      suu += points[j].w * u[j] * u[j];
-      sur += points[j].w * u[j] * points[j].rate;
+    for (let j = 0; j < obs.length; j++) {
+      suu += obs[j].w * u[j] * u[j];
+      sur += obs[j].w * u[j] * obs[j].r;
     }
     if (suu < 1e-12) continue;
     const ceiling = clamp(sur / suu, 0.01, 99.99);
     let sse = 0;
-    for (let j = 0; j < points.length; j++) {
-      const resid = points[j].rate - ceiling * u[j];
-      sse += points[j].w * resid * resid;
+    for (let j = 0; j < obs.length; j++) {
+      const resid = obs[j].r - ceiling * u[j];
+      sse += obs[j].w * resid * resid;
     }
-    if (best === null || sse < best.sse) best = { ceiling, paceHours: h, sse };
+    if (best === null || sse < best.sse) best = { ceiling, pace: h, sse };
   }
-  return best === null ? null : { ceiling: best.ceiling, paceHours: best.paceHours };
+  return best === null ? null : { ceiling: best.ceiling, pace: best.pace };
 }
 
 /**
  * The saturating fit with shrinkage: the pace H is pulled in log space
- * toward the mean pace of trophies of the same kind (groupLogH), then the
- * ceiling is refit given the shrunk pace, so the curve still passes through
- * the data's level. The residual spread is measured on the logit scale, so
- * it can feed the same spread machinery as the line fit.
+ * toward the mean pace of trophies of the same kind (groupLogPace), then
+ * the ceiling is refitted at the shrunk pace so the curve still passes
+ * through the data's level. The residual spread is measured on the logit
+ * scale, so it feeds the same spread machinery as the line fit.
  */
-function saturatingFit(points: SatPoint[], groupLogH: number): SaturatingFit | null {
-  const raw = saturatingFitRaw(points);
+function fitSaturation(obs: Obs[], groupLogPace: number): SatFit | null {
+  const raw = fitSaturationRaw(obs);
   if (raw === null) return null;
-  const n = points.length;
-  const logH = (n * Math.log(raw.paceHours) + 3 * groupLogH) / (n + 3);
-  const paceHours = Math.exp(logH);
-  const u = points.map((p) => 1 - Math.exp(-p.tau / paceHours));
+  const n = obs.length;
+  const pace = Math.exp((n * Math.log(raw.pace) + 3 * groupLogPace) / (n + 3));
+  const u = obs.map((o) => 1 - Math.exp(-o.t / pace));
   let suu = 0;
   let sur = 0;
-  for (let j = 0; j < points.length; j++) {
-    suu += points[j].w * u[j] * u[j];
-    sur += points[j].w * u[j] * points[j].rate;
+  for (let j = 0; j < obs.length; j++) {
+    suu += obs[j].w * u[j] * u[j];
+    sur += obs[j].w * u[j] * obs[j].r;
   }
   const ceiling = suu < 1e-12 ? raw.ceiling : clamp(sur / suu, 0.01, 99.99);
   let sse = 0;
   let wsum = 0;
-  for (let j = 0; j < points.length; j++) {
-    const fitted = clampRate(ceiling * u[j]);
-    const resid = logit(points[j].rate) - logit(fitted);
-    sse += points[j].w * resid * resid;
-    wsum += points[j].w;
+  for (let j = 0; j < obs.length; j++) {
+    const fitted = clampPct(ceiling * u[j]);
+    const resid = logitOf(obs[j].r) - logitOf(fitted);
+    sse += obs[j].w * resid * resid;
+    wsum += obs[j].w;
   }
-  return { ceiling, paceHours, residLogitSd: Math.sqrt(sse / Math.max(wsum, 1e-9)), n };
-}
-
-interface TrendFit {
-  /** Intercept of logit(rate) on log(1 + hours). */
-  alpha: number;
-  /** Slope, after shrinkage toward the kind's mean slope. */
-  beta: number;
-  /** Residual spread of the logit rates around the fitted line. */
-  residSd: number;
-  n: number;
-  xMean: number;
-  sxx: number;
+  return { ceiling, pace, resid: Math.sqrt(sse / Math.max(wsum, 1e-9)), n };
 }
 
 /**
- * Weighted least squares of logit(rate) on log(1 + hours), with a read's
- * weight its binomial precision — earners x (tracked - earners) / tracked —
- * so a plateau with many players tracked counts more than one with a few.
- * The slope is then shrunk toward the mean slope of trophies of the same
- * kind (groupSlope), which keeps a noisy slope on one trophy from running
- * away; the intercept is refit given the shrunk slope. Returns null when
- * the trophy has fewer than two usable plateau points.
+ * Weighted least squares of logit(rate) on log(1 + hours), a read's
+ * weight its binomial precision. The slope is shrunk toward the mean
+ * slope of trophies of the same kind (groupSlope) so a noisy slope on
+ * one trophy cannot run away; the intercept is refitted at the shrunk
+ * slope. Null below two usable points.
  */
-function trendFit(
-  points: Array<{ x: number; y: number; w: number }>,
-  groupSlope: number,
-): TrendFit | null {
-  if (points.length < 2) return null;
+function fitLogitLine(obs: Obs[], groupSlope: number): LineFit | null {
+  if (obs.length < 2) return null;
+  const xs = obs.map((o) => Math.log1p(o.t));
+  const ys = obs.map((o) => logitOf(o.r));
+  const ws = obs.map((o) => o.w);
+  const [, betaRaw] = weightedLine(xs, ys, ws);
+  const n = obs.length;
+  const slope = (n * betaRaw + 4 * groupSlope) / (n + 4);
+  // Refit the intercept at the shrunk slope, so the line still passes
+  // through the data's centre.
   let sw = 0;
   let swx = 0;
   let swy = 0;
-  let swxx = 0;
-  let swxy = 0;
-  for (const p of points) {
-    sw += p.w;
-    swx += p.w * p.x;
-    swy += p.w * p.y;
-    swxx += p.w * p.x * p.x;
-    swxy += p.w * p.x * p.y;
+  for (let j = 0; j < n; j++) {
+    sw += ws[j];
+    swx += ws[j] * xs[j];
+    swy += ws[j] * ys[j];
   }
-  const denom = sw * swxx - swx * swx;
-  if (Math.abs(denom) < 1e-12) return null;
-  const betaRaw = (sw * swxy - swx * swy) / denom;
-  const alphaRaw = (swy - betaRaw * swx) / sw;
-  // Shrink the slope toward the kind's mean; a trophy with few points
-  // leans on its kind, one with many stands on its own.
-  const n = points.length;
-  const beta = (n * betaRaw + 4 * groupSlope) / (n + 4);
-  // Refit the intercept given the shrunk slope, so the line still passes
-  // through the data's centre.
-  const alpha = (swy - beta * swx) / sw;
+  const intercept = sw > 0 ? (swy - slope * swx) / sw : 0;
   let sse = 0;
   let wsum = 0;
-  for (const p of points) {
-    const resid = p.y - (alpha + beta * p.x);
-    sse += p.w * resid * resid;
-    wsum += p.w;
+  for (let j = 0; j < n; j++) {
+    const resid = ys[j] - (intercept + slope * xs[j]);
+    sse += ws[j] * resid * resid;
+    wsum += ws[j];
   }
-  const residSd = Math.sqrt(sse / Math.max(wsum, 1e-9));
-  const xMean = swx / sw;
-  let sxx = 0;
-  for (const p of points) sxx += p.w * (p.x - xMean) * (p.x - xMean);
-  return { alpha, beta, residSd, n, xMean, sxx };
+  const meanX = sw > 0 ? swx / sw : 0;
+  let ssx = 0;
+  for (let j = 0; j < n; j++) ssx += ws[j] * (xs[j] - meanX) * (xs[j] - meanX);
+  return { intercept, slope, resid: Math.sqrt(sse / Math.max(wsum, 1e-9)), n, meanX, ssx };
 }
 
 /**
  * The dilution forecast: when tracked players jump from N to N', the new
  * players bring earners at a fraction of the old rate. A new player has
  * typically had about an hour of play, and earning a trophy that needs H
- * hours of play is roughly exp(-H / 0.75) as likely for them as for a
- * player counted earlier — the launch cohort's playtime is itself roughly
- * exponential, so the ratio of the two tails is an exponential in H. The
- * opening mission is the exception: everybody finishes it in their first
- * minutes, so new players bring it at the full rate.
+ * hours is roughly exp(-H / 0.75) as likely for them as for a player
+ * counted earlier — the launch cohort's playtime is itself roughly
+ * exponential, so the ratio of the two tails is an exponential in H.
+ * The opening mission is the exception: everybody finishes it in their
+ * first minutes, so new players bring it at the full rate.
  */
-function dilutionForecast(
-  kind: Kind,
-  lastRate: number,
-  lastEarners: number,
-  nLast: number,
-  nTarget: number,
-): number {
-  if (kind.kind === 'opening' || lastRate >= 99.9) return 99.99;
-  // Half an earner of smoothing: a trophy nobody has earned yet can still
-  // be earned by a new player who tries the right thing first.
-  const smoothRate = (lastEarners + 0.5) / (nLast + 1);
+function dilutedRate(kind: TrophyKind, lastRate: number, lastEarners: number, nLast: number, nTarget: number): number {
+  if (kind.label === 'opening' || lastRate >= 99.9) return 99.99;
+  // Half an earner of smoothing: a trophy nobody has earned yet can
+  // still be earned by a newcomer who tries the right thing first.
+  const smooth = (lastEarners + 0.5) / (nLast + 1);
   const discount = Math.exp(-kind.hours / 0.75);
-  const newEarners = lastEarners + smoothRate * discount * Math.max(0, nTarget - nLast);
-  return (100 * newEarners) / Math.max(1, nTarget);
+  const earners = lastEarners + smooth * discount * Math.max(0, nTarget - nLast);
+  return (100 * earners) / Math.max(1, nTarget);
+}
+
+/** Mean fitted slope and mean fitted log pace per kind and per tier, for shrinkage. */
+function kindAverages(c: CaseFile, slices: Slice[], kinds: TrophyKind[]): Map<string, { slope: number; logPace: number }> {
+  const slopes = new Map<string, number[]>();
+  const logPaces = new Map<string, number[]>();
+  const push = (map: Map<string, number[]>, key: string, v: number): void => {
+    const arr = map.get(key) ?? [];
+    arr.push(v);
+    map.set(key, arr);
+  };
+  for (let i = 0; i < c.trophies.length; i++) {
+    const obs = observations(slices, i);
+    if (obs.length < 2) continue;
+    const keys = [kinds[i].label, c.trophies[i].tier];
+    // Unshrunk fits, just to learn the kind's typical pace.
+    const line = fitLogitLine(obs, 0);
+    if (line !== null) {
+      // Undo the shrinkage fitLogitLine applied with groupSlope 0, so
+      // the raw slope is what gets averaged.
+      const rawSlope = (line.slope * (obs.length + 4)) / obs.length;
+      for (const key of keys) push(slopes, key, rawSlope);
+    }
+    const sat = fitSaturationRaw(obs);
+    if (sat !== null) {
+      for (const key of keys) push(logPaces, key, Math.log(sat.pace));
+    }
+  }
+  const mean = (arr: number[]): number => arr.reduce((s, v) => s + v, 0) / arr.length;
+  const out = new Map<string, { slope: number; logPace: number }>();
+  for (const key of new Set([...slopes.keys(), ...logPaces.keys()])) {
+    out.set(key, {
+      slope: slopes.has(key) ? mean(slopes.get(key) as number[]) : 0,
+      logPace: logPaces.has(key) ? mean(logPaces.get(key) as number[]) : Math.log(40),
+    });
+  }
+  return out;
 }
 
 /**
  * Forecast one trophy. Returns its five quantiles and the median rate.
- * `groupSlope` is the mean fitted slope of the trophy's kind, used to
- * shrink its own slope; `nTarget` the forecast tracked count at the target.
+ * `groups` holds the kind's mean slope and log pace for shrinkage;
+ * `nTarget` is the forecast tracked count at the target.
  */
-function forecastTrophy(
+function forecastRow(
   c: CaseFile,
-  trophies: Trophy[],
-  plateaus: Plateau[],
-  kinds: Kind[],
-  groupStats: Map<string, { beta: number; logH: number }>,
+  slices: Slice[],
+  kinds: TrophyKind[],
+  groups: Map<string, { slope: number; logPace: number }>,
   nTarget: number,
   tTarget: number,
   idx: number,
 ): { q: number[]; median: number } {
-  const t = trophies[idx];
+  const t = c.trophies[idx];
   const kind = kinds[idx];
-  const last = plateaus[plateaus.length - 1];
-  // The trophy's last observed rate, scanning back over plateaus that
+  const last = slices[slices.length - 1];
+  // The trophy's last observed rate, scanning back over slices that
   // lacked it.
   let lastRate: number | null = null;
   let lastEarners = 0;
-  for (let j = plateaus.length - 1; j >= 0; j--) {
-    const r = plateaus[j].rates[idx];
+  for (let j = slices.length - 1; j >= 0; j--) {
+    const r = slices[j].rates[idx];
     if (r !== null && r !== undefined) {
       lastRate = r;
-      lastEarners = Math.round((r / 100) * plateaus[j].tracked);
+      lastEarners = Math.round((r / 100) * slices[j].players);
       break;
     }
   }
   if (lastRate === null) lastRate = 0.5;
 
-  // A trophy that has sat at 100% at every plateau gets a hedged row: the
-  // median stays at 100%, the lower quantiles admit that a flood of new
-  // players could pull it down, and the hedge tightens once the trophy has
-  // survived a tenfold growth in tracked players without budging.
-  const alwaysFull = plateaus.every((p) => {
-    const r = p.rates[idx];
+  // A trophy at 100% on every slice gets a hedged row: the median stays
+  // at 100%, the lower quantiles admit that a flood of new players could
+  // pull it down, and the hedge tightens once the trophy has survived a
+  // tenfold growth in tracked players without budging.
+  const alwaysFull = slices.every((s) => {
+    const r = s.rates[idx];
     return r !== null && r !== undefined && r >= 99.9;
   });
   if (lastRate >= 99.9 && alwaysFull) {
-    const growth = last.tracked / Math.max(1, plateaus[0].tracked);
+    const growth = last.players / Math.max(1, slices[0].players);
     const row = growth >= 10
       ? [99.9, 99.97, 99.99, 99.99, 99.99]
       : [99.5, 99.9, 99.99, 99.99, 99.99];
     return { q: row, median: 99.99 };
   }
 
-  // Points for the trend fits: one per plateau that lists the trophy.
-  const points: Array<{ x: number; y: number; w: number }> = [];
-  const satPoints: SatPoint[] = [];
-  for (const p of plateaus) {
-    const r = p.rates[idx];
-    if (r === null || r === undefined) continue;
-    const e = Math.round((clampRate(r) / 100) * p.tracked);
-    const w = clamp((e * Math.max(1, p.tracked - e)) / Math.max(1, p.tracked), 0.5, 500);
-    points.push({ x: Math.log1p(p.tHours), y: logit(r), w });
-    satPoints.push({ tau: p.tHours, rate: clampRate(r), w });
-  }
-  const stats = groupStats.get(kind.kind) ?? groupStats.get(t.tier) ?? { beta: 0, logH: Math.log(40) };
-  const fit = trendFit(points, stats.beta);
-  const sat = saturatingFit(satPoints, stats.logH);
+  const obs = observations(slices, idx);
+  const group = groups.get(kind.label) ?? groups.get(t.tier) ?? { slope: 0, logPace: Math.log(40) };
+  const line = fitLogitLine(obs, group.slope);
+  const sat = fitSaturation(obs, group.logPace);
   const xTarget = Math.log1p(tTarget);
-  const dil = dilutionForecast(kind, lastRate, lastEarners, last.tracked, nTarget);
-  // The trend reading: the saturating curve, blended three-to-one with the
-  // logit line in logit space, so a trophy still climbing steeply is not
-  // held back entirely by the curve, and a flattening one is not dragged
-  // onward by the line.
-  const trendMedian = (): number | null => {
-    const lin = fit === null ? null : invLogit(fit.alpha + fit.beta * xTarget);
-    const satMed = sat === null ? null : clampRate(sat.ceiling * (1 - Math.exp(-tTarget / sat.paceHours)));
+  const dil = dilutedRate(kind, lastRate, lastEarners, last.players, nTarget);
+  // The trend reading: the saturating curve, blended three-to-one with
+  // the logit line in logit space, so a trophy still climbing steeply is
+  // not held back entirely by the curve, and a flattening one is not
+  // dragged onward by the line.
+  const trendReading = (): number | null => {
+    const lin = line === null ? null : pctOfLogit(line.intercept + line.slope * xTarget);
+    const satMed = sat === null ? null : clampPct(sat.ceiling * (1 - Math.exp(-tTarget / sat.pace)));
     if (lin === null) return satMed;
     if (satMed === null) return lin;
-    return invLogit(0.75 * logit(satMed) + 0.25 * logit(lin));
+    return pctOfLogit(0.75 * logitOf(satMed) + 0.25 * logitOf(lin));
   };
 
   let median: number;
   let sigmaFit = 0.5;
-  if (plateaus.length >= 3) {
-    const tm = trendMedian();
+  if (slices.length >= 3) {
+    const tm = trendReading();
     if (tm !== null) {
       median = tm;
-      const resid = sat !== null ? sat.residLogitSd : fit !== null ? fit.residSd : 0.5;
-      if (fit !== null && fit.n >= 3) {
-        const leverage = 1 + 1 / fit.n + ((xTarget - fit.xMean) ** 2) / Math.max(fit.sxx, 1e-9);
+      const resid = sat !== null ? sat.resid : line !== null ? line.resid : 0.5;
+      if (line !== null && line.n >= 3) {
+        const leverage = 1 + 1 / line.n + ((xTarget - line.meanX) ** 2) / Math.max(line.ssx, 1e-9);
         sigmaFit = clamp(resid * Math.min(2.5, Math.sqrt(Math.max(1, leverage))), 0.15, 1.5);
       } else {
         sigmaFit = clamp(resid, 0.15, 1.5);
@@ -581,15 +602,11 @@ function forecastTrophy(
       median = dil;
       sigmaFit = 0.5;
     }
-  } else if (plateaus.length === 2) {
+  } else if (slices.length === 2) {
     // One refresh seen: average the trend's reading with the dilution
     // arithmetic, in logit space, so neither decides alone.
-    const tm = trendMedian();
-    if (tm !== null) {
-      median = invLogit((logit(tm) + logit(dil)) / 2);
-    } else {
-      median = dil;
-    }
+    const tm = trendReading();
+    median = tm !== null ? pctOfLogit((logitOf(tm) + logitOf(dil)) / 2) : dil;
     sigmaFit = 0.45;
   } else {
     // No trend to fit: the dilution arithmetic is all there is.
@@ -597,101 +614,51 @@ function forecastTrophy(
     sigmaFit = 0.5;
   }
 
-  // Guardrails: earners cannot fall, and no trophy can exceed its kind's
+  // Guardrails: earners cannot fall, and no trophy can pass its kind's
   // generous one-week ceiling.
   const floorRate = (100 * lastEarners) / Math.max(1, nTarget);
   median = clamp(Math.max(median, floorRate), 0.01, 99.99);
-  median = Math.min(median, kind.cap);
+  median = Math.min(median, kind.ceiling);
 
-  // Spread on the logit scale: the fit's own residual, a random walk that
-  // widens with the square root of the horizon, a refresh jump
+  // Spread on the logit scale: the fit's own residual, a random walk
+  // that widens with the square root of the horizon, a refresh jump
   // proportional to the expected growth in tracked players, a small-count
   // term for trophies with only a handful of earners, and a floor.
   const sigmaRw = 0.5 * Math.sqrt(c.horizon_minutes / 1440);
-  const sigmaJump = Math.sqrt((0.8 * Math.abs(Math.log(nTarget / Math.max(1, last.tracked)))) ** 2 + 0.35 ** 2);
+  const sigmaJump = Math.sqrt((0.8 * Math.abs(Math.log(nTarget / Math.max(1, last.players)))) ** 2 + 0.35 ** 2);
   const sigmaSmall = Math.min(0.5, 0.5 / Math.sqrt(lastEarners + 1));
   const sigma = Math.min(
     3,
     Math.max(0.45, Math.sqrt(sigmaFit ** 2 + sigmaRw ** 2 + sigmaJump ** 2 + sigmaSmall ** 2 + 0.3 ** 2)),
   );
-  const medLogit = logit(median);
-  const q = LEVELS.map((level) => round4(clampRate(invLogit(medLogit + normQuantile(level) * sigma))));
+  const medLogit = logitOf(median);
+  const q = LEVELS.map((level) => round4(clampPct(pctOfLogit(medLogit + normalQuantile(level) * sigma))));
   // Rounding can only ever make neighbours equal, never invert them, but
   // enforce the ordering explicitly all the same.
   for (let j = 1; j < q.length; j++) q[j] = Math.max(q[j], q[j - 1]);
   return { q, median };
 }
 
-/** Mean fitted slope and mean fitted log pace per kind (and per tier), for shrinkage. */
-function computeGroupStats(
-  c: CaseFile,
-  plateaus: Plateau[],
-  kinds: Kind[],
-): Map<string, { beta: number; logH: number }> {
-  const rawSlopes = new Map<string, number[]>();
-  const rawLogH = new Map<string, number[]>();
-  for (let i = 0; i < c.trophies.length; i++) {
-    const points: Array<{ x: number; y: number; w: number }> = [];
-    const satPoints: SatPoint[] = [];
-    for (const p of plateaus) {
-      const r = p.rates[i];
-      if (r === null || r === undefined) continue;
-      const e = Math.round((clampRate(r) / 100) * p.tracked);
-      const w = clamp((e * Math.max(1, p.tracked - e)) / Math.max(1, p.tracked), 0.5, 500);
-      points.push({ x: Math.log1p(p.tHours), y: logit(r), w });
-      satPoints.push({ tau: p.tHours, rate: clampRate(r), w });
-    }
-    if (points.length < 2) continue;
-    const keys = [kinds[i].kind, c.trophies[i].tier];
-    // Unshrunk fits, just to learn the kind's typical pace.
-    const fit = trendFit(points, 0);
-    if (fit !== null) {
-      // Undo the shrinkage trendFit applied with groupSlope 0, so the raw
-      // slope is what gets averaged: beta = (n*betaRaw + 0)/(n+4).
-      const betaRaw = (fit.beta * (points.length + 4)) / points.length;
-      for (const key of keys) {
-        const arr = rawSlopes.get(key) ?? [];
-        arr.push(betaRaw);
-        rawSlopes.set(key, arr);
-      }
-    }
-    const sat = saturatingFitRaw(satPoints);
-    if (sat !== null) {
-      for (const key of keys) {
-        const arr = rawLogH.get(key) ?? [];
-        arr.push(Math.log(sat.paceHours));
-        rawLogH.set(key, arr);
-      }
-    }
-  }
-  const mean = (arr: number[]): number => arr.reduce((s, v) => s + v, 0) / arr.length;
-  const out = new Map<string, { beta: number; logH: number }>();
-  const keys = new Set([...rawSlopes.keys(), ...rawLogH.keys()]);
-  for (const key of keys) {
-    out.set(key, {
-      beta: rawSlopes.has(key) ? mean(rawSlopes.get(key) as number[]) : 0,
-      logH: rawLogH.has(key) ? mean(rawLogH.get(key) as number[]) : Math.log(40),
-    });
-  }
-  return out;
-}
-
-function forecastCase(c: CaseFile): { trophies: Array<{ id: number; q: number[] }> } {
+function runCase(c: CaseFile): { trophies: Array<{ id: number; q: number[] }> } {
   const releaseMs = Date.parse(`${c.game.release_date}T00:00:00Z`);
-  const originMs = Number.isNaN(releaseMs) ? Date.parse(c.history[0].at) : releaseMs;
-  const plateaus = extractPlateaus(c, originMs);
-  if (plateaus.length === 0) {
+  // Fall back to the first read's time when the release date is missing;
+  // with no history at all the origin is never used, because
+  // collapseHistory returns no slices and the empty-history rows apply.
+  const firstReadMs = c.history.length > 0 ? Date.parse(c.history[0].at) : NaN;
+  const originMs = Number.isNaN(releaseMs) ? firstReadMs : releaseMs;
+  const slices = collapseHistory(c, originMs);
+  if (slices.length === 0) {
     // No history at all: say almost nothing, but say it widely.
     return {
       trophies: c.trophies.map((t) => ({ id: t.id, q: [0.01, 0.1, 1, 10, 50] })),
     };
   }
   const tTarget = Math.max(0.1, (Date.parse(c.target) - originMs) / 3_600_000);
-  const nTarget = forecastTracked(plateaus, tTarget);
-  const kinds = c.trophies.map(classify);
-  const groupStats = computeGroupStats(c, plateaus, kinds);
+  const nTarget = projectTracked(slices, tTarget);
+  const kinds = c.trophies.map(kindOf);
+  const groups = kindAverages(c, slices, kinds);
   const trophies = c.trophies.map((t, i) => {
-    const { q } = forecastTrophy(c, c.trophies, plateaus, kinds, groupStats, nTarget, tTarget, i);
+    const { q } = forecastRow(c, slices, kinds, groups, nTarget, tTarget, i);
     return { id: t.id, q };
   });
   return { trophies };
@@ -706,6 +673,6 @@ for (const file of inputs) {
   if (!Array.isArray(c.trophies) || !Array.isArray(c.history)) {
     throw new Error(`${file} is not a trophies case`);
   }
-  const out = forecastCase(c);
+  const out = runCase(c);
   writeFileSync(join(OUTPUT_DIR, `${id}.out`), `${JSON.stringify(out)}\n`);
 }
